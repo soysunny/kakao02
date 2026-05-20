@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>School War Map Service</title>
+    <style>
+        /* 기본 레이아웃 설정 */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: 'Malgun Gothic', sans-serif;
+            overflow: hidden;
+        }
+
+        #wrapper {
+            display: flex;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 왼쪽 사이드바 (검색 및 리스트) */
+        #sidebar {
+            width: 350px;
+            height: 100%;
+            background: #f8f9fa;
+            border-right: 1px solid #ddd;
+            display: flex;
+            flex-direction: column;
+            z-index: 10;
+        }
+
+        .search-container {
+            padding: 20px;
+            background: #fff;
+            border-bottom: 1px solid #eee;
+        }
+
+        .search-container input {
+            width: 70%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .search-container button {
+            padding: 10px;
+            background: #3385ff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        #results {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        #results li {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+        }
+
+        #results li:hover { background: #f1f1f1; }
+
+        /* 오른쪽 지도 영역 */
+        #map {
+            flex: 1;
+            height: 100%;
+            position: relative;
+        }
+
+        /* 탱크 아이콘 버튼 */
+        #tank-btn {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            background: #4CAF50;
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            z-index: 20;
+            font-size: 30px;
+        }
+
+        /* 전쟁 모드 UI 요소들 */
+        .hp-bar-container {
+            width: 60px;
+            height: 10px;
+            background: #eee;
+            border: 1px solid #000;
+            position: relative;
+        }
+
+        .hp-bar-fill {
+            height: 100%;
+            background: #ff4444;
+            transition: width 0.3s;
+        }
+
+        .school-label {
+            background: white;
+            padding: 2px 5px;
+            border-radius: 3px;
+            border: 1px solid #333;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            text-align: center;
+        }
+
+        #countdown-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 100px;
+            font-weight: bold;
+            z-index: 100;
+        }
+
+        .defeat-mark {
+            color: red;
+            font-weight: bold;
+            background: white;
+            padding: 5px;
+            border: 2px solid red;
+        }
+    </style>
+</head>
+<body>
+
+<div id="wrapper">
+    <div id="sidebar">
+        <div class="search-container">
+            <input type="text" id="keyword" placeholder="장소를 검색해보세요">
+            <button onclick="searchPlaces()">검색</button>
+        </div>
+        <ul id="results"></ul>
+    </div>
+
+    <div id="map">
+        <div id="tank-btn" title="전쟁 모드 시작">🪖</div>
+        <div id="countdown-overlay">3</div>
+    </div>
+</div>
+
+<script type="text/javascript" src="//dapi.kakao.com/v2/maps/sdk.js?appkey=37dc609e2343657a26ee7579358539e1&libraries=services&autoload=false"></script>
+
+<script>
+    let map, ps;
+    let isWarMode = false;
+    let warInterval = null;
+    let userTargetId = null; // 고양국제고가 공격할 대상 ID
+
+    // 학교 데이터 정의
+    const schools = [
+        { id: 0, name: "고양국제고", lat: 37.671912, lng: 126.812324, hp: 30, isPlayer: true },
+        { id: 1, name: "양일초", lat: 37.671040, lng: 126.815520, hp: 30, isPlayer: false },
+        { id: 2, name: "저현고", lat: 37.672018, lng: 126.813847, hp: 30, isPlayer: false },
+        { id: 3, name: "일산양일중", lat: 37.671562, lng: 126.816212, hp: 30, isPlayer: false },
+        { id: 4, name: "원중초", lat: 37.674062, lng: 126.814521, hp: 30, isPlayer: false }
+    ];
+
+    let schoolOverlays = [];
+
+    // 1. 지도 및 초기 설정 로드
+    kakao.maps.load(() => {
+        const container = document.getElementById('map');
+        const options = {
+            center: new kakao.maps.LatLng(37.566826, 126.9786567),
+            level: 5
+        };
+        map = new kakao.maps.Map(container, options);
+        ps = new kakao.maps.services.Places();
+
+        // 현재 위치 가져오기
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((pos) => {
+                const moveLatLon = new kakao.maps.LatLng(pos.coords.latitude, pos.coords.longitude);
+                map.setCenter(moveLatLon);
+            });
+        }
+    });
+
+    // 2. 장소 검색 기능
+    function searchPlaces() {
+        const keyword = document.getElementById('keyword').value;
+        if (!keyword.replace(/^\s+|\s+$/g, '')) return alert('키워드를 입력해주세요!');
+        ps.keywordSearch(keyword, (data, status) => {
+            if (status === kakao.maps.services.Status.OK) {
+                displayResults(data);
+            }
+        });
+    }
+
+    function displayResults(data) {
+        const listEl = document.getElementById('results');
+        listEl.innerHTML = "";
+        data.forEach((item) => {
+            const li = document.createElement('li');
+            li.innerHTML = item.place_name;
+            li.onclick = () => {
+                const pos = new kakao.maps.LatLng(item.y, item.x);
+                map.panTo(pos);
+            };
+            listEl.appendChild(li);
+        });
+    }
+
+    // 3. 전쟁 모드 로직
+    document.getElementById('tank-btn').onclick = function() {
+        if (isWarMode) return;
+        startWarMode();
+    };
+
+    function startWarMode() {
+        isWarMode = true;
+        // 학교들을 모두 담을 수 있는 위치로 이동 (중심점 계산)
+        const bounds = new kakao.maps.LatLngBounds();
+        schools.forEach(s => bounds.extend(new kakao.maps.LatLng(s.lat, s.lng)));
+        map.setBounds(bounds);
+
+        // UI 생성 (체력바 등)
+        createSchoolUI();
+
+        // 3초 카운트다운
+        const overlay = document.getElementById('countdown-overlay');
+        overlay.style.display = 'flex';
+        let count = 3;
+        overlay.innerText = count;
+
+        let timer = setInterval(() => {
+            count--;
+            overlay.innerText = count;
+            if (count <= 0) {
+                clearInterval(timer);
+                overlay.style.display = 'none';
+                beginBattle();
+            }
+        }, 1000);
+    }
+
+    function createSchoolUI() {
+        schools.forEach((school) => {
+            school.hp = 30; // 체력 초기화
+            const content = document.createElement('div');
+            content.id = `school-node-${school.id}`;
+            content.innerHTML = `
+                <div class="school-label">${school.name}</div>
+                <div class="hp-bar-container">
+                    <div id="hp-fill-${school.id}" class="hp-bar-fill" style="width: 100%;"></div>
+                </div>
+                <div id="status-${school.id}"></div>
+            `;
+            
+            // 학교 클릭 시 사용자의 타겟으로 설정
+            content.onclick = () => {
+                if (school.id !== 0 && school.hp > 0) {
+                    userTargetId = school.id;
+                    alert(`${school.name}을(를) 공격 대상으로 설정했습니다!`);
+                }
+            };
+
+            const customOverlay = new kakao.maps.CustomOverlay({
+                position: new kakao.maps.LatLng(school.lat, school.lng),
+                content: content,
+                yAnchor: 1
+            });
+            customOverlay.setMap(map);
+            schoolOverlays.push(customOverlay);
+        });
+    }
+
+    function beginBattle() {
+        warInterval = setInterval(() => {
+            // 각 학교 레이저 발사 로직
+            schools.forEach(source => {
+                if (source.hp <= 0) return;
+
+                let target = null;
+                if (source.isPlayer) {
+                    // 고양국제고: 사용자가 선택한 대상 공격
+                    if (userTargetId !== null) {
+                        target = schools.find(s => s.id === userTargetId);
+                        if (target && target.hp <= 0) target = null;
+                    }
+                } else {
+                    // 나머지 학교: 랜덤 공격
+                    const enemies = schools.filter(s => s.id !== source.id && s.hp > 0);
+                    if (enemies.length > 0) {
+                        target = enemies[Math.floor(Math.random() * enemies.length)];
+                    }
+                }
+
+                if (target) {
+                    fireLaser(source, target);
+                }
+            });
+
+            checkGameOver();
+        }, 1000);
+    }
+
+    // 레이저 시각 효과 및 데미지 판정
+    function fireLaser(source, target) {
+        // 시각적 레이저 효과 (Polyline 이용)
+        const path = [
+            new kakao.maps.LatLng(source.lat, source.lng),
+            new kakao.maps.LatLng(target.lat, target.lng)
+        ];
+        const laser = new kakao.maps.Polyline({
+            path: path,
+            strokeWeight: 3,
+            strokeColor: source.isPlayer ? '#3385ff' : '#ff4444',
+            strokeOpacity: 0.8,
+            strokeStyle: 'solid'
+        });
+        laser.setMap(map);
+
+        // 0.2초 후 레이저 사라짐
+        setTimeout(() => laser.setMap(null), 200);
+
+        // 데미지 적용
+        target.hp -= 1;
+        const hpFill = document.getElementById(`hp-fill-${target.id}`);
+        if (hpFill) {
+            hpFill.style.width = (target.hp / 30 * 100) + "%";
+        }
+
+        // 체력이 0이 되면 패배 처리
+        if (target.hp <= 0) {
+            const status = document.getElementById(`status-${target.id}`);
+            if (status) status.innerHTML = "<div class='defeat-mark'>패배</div>";
+        }
+    }
+
+    function checkGameOver() {
+        const survivors = schools.filter(s => s.hp > 0);
+        if (survivors.length <= 1) {
+            const winner = survivors.length === 1 ? survivors[0].name : "없음";
+            alert(`전쟁 종료! 승자: ${winner}`);
+            resetWarMode();
+        }
+    }
+
+    function resetWarMode() {
+        clearInterval(warInterval);
+        isWarMode = false;
+        userTargetId = null;
+        
+        // 오버레이 제거
+        schoolOverlays.forEach(o => o.setMap(null));
+        schoolOverlays = [];
+
+        // 처음 상태로 복구 (지도 중심 현재 위치 재시도 가능)
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((pos) => {
+                map.setCenter(new kakao.maps.LatLng(pos.coords.latitude, pos.coords.longitude));
+                map.setLevel(5);
+            });
+        }
+    }
+</script>
+
+</body>
+</html>
